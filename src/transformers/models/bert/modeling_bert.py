@@ -13,7 +13,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch BERT model."""
+# Goro Kobayashi modified some parts of this file.
+# Modified parts are noticed with comments (e.g., "added by Goro Kobayashi").
+# Do not redistribute without permission from Goro Kobayashi.
+"""PyTorch BERT model. """
 
 
 import math
@@ -281,6 +284,7 @@ class BertSelfAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        output_norms: Optional[bool] = False,  # added by Goro Kobayashi
     ) -> Tuple[torch.Tensor]:
         mixed_query_layer = self.query(hidden_states)
 
@@ -367,6 +371,13 @@ class BertSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 
+        # added below by Goro Kobayashi
+        #-------------------------------
+        if output_norms:
+            outputs = (context_layer, attention_probs, value_layer)
+            return outputs
+        #-------------------------------
+
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
         if self.is_decoder:
@@ -386,6 +397,60 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
+    
+    
+class BertNormOutput(nn.Module): # This class is added by Goro Kobayashi
+    def __init__(self, config):
+        super().__init__()
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+    def forward(self, hidden_states, attention_probs, value_layer, dense):
+        # hidden_states: (batch, seq_length, all_head_size)
+        # attention_probs: (batch, num_heads, seq_length, seq_length)
+        # value_layer: (batch, num_heads, seq_length, head_size)
+        # dense: nn.Linear(all_head_size, all_head_size)
+
+        with torch.no_grad():
+            # value_layer is converted to (batch, seq_length, num_heads, 1, head_size)
+            value_layer = value_layer.permute(0, 2, 1, 3).contiguous()
+            value_shape = value_layer.size()
+            value_layer = value_layer.view(value_shape[:-1] + (1, value_shape[-1],))
+
+            # dense weight is converted to (num_heads, head_size, all_head_size)
+            dense = dense.weight
+            dense = dense.view(self.all_head_size, self.num_attention_heads, self.attention_head_size)
+            dense = dense.permute(1, 2, 0).contiguous()
+
+            # Make transformed vectors f(x) from Value vectors (value_layer) and weight matrix (dense).
+            transformed_layer = value_layer.matmul(dense)
+            transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
+            transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
+            transformed_layer = transformed_layer.permute(0, 2, 1, 3).contiguous() 
+            transformed_shape = transformed_layer.size() #(batch, num_heads, seq_length, all_head_size)
+            transformed_norm = torch.norm(transformed_layer, dim=-1)
+
+            # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
+            weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
+            weighted_norm = torch.norm(weighted_layer, dim=-1)
+
+            # Sum each αf(x) over all heads: (batch, seq_length, seq_length, all_head_size)
+            summed_weighted_layer = weighted_layer.sum(dim=1)
+
+            # Calculate L2 norm of summed weighted vectors: (batch, seq_length, seq_length)
+            summed_weighted_norm = torch.norm(summed_weighted_layer, dim=-1)
+
+            del transformed_shape
+            
+            # outputs: ||f(x)||, ||αf(x)||, ||Σαf(x)||
+            outputs = (transformed_norm,
+                    weighted_norm,
+                    summed_weighted_norm,
+                    )
+            del transformed_layer, weighted_layer, summed_weighted_layer
+        torch.cuda.empty_cache()
+        return outputs
 
 
 class BertAttention(nn.Module):
@@ -394,6 +459,7 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
+        self.norm = BertNormOutput(config)  # added by Goro Kobayashi
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -422,6 +488,7 @@ class BertAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        output_norms: Optional[bool] = False, # added by Goro Kobayashi
     ) -> Tuple[torch.Tensor]:
         self_outputs = self.self(
             hidden_states,
@@ -431,8 +498,20 @@ class BertAttention(nn.Module):
             encoder_attention_mask,
             past_key_value,
             output_attentions,
-        )
+            output_norms=output_norms,
+        )  # changed by Goro Kobayashi
+        
         attention_output = self.output(self_outputs[0], hidden_states)
+        
+        # changed below by Goro Kobayashi
+        #-------------------------------
+        if output_norms:
+            norms_outputs = self.norm(hidden_states, self_outputs[1], self_outputs[2], self.output.dense)
+            outputs = (attention_output, self_outputs[1],) + norms_outputs # add attentions and norms if we output them
+            return outputs
+        #-------------------------------
+        
+        
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -490,6 +569,7 @@ class BertLayer(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        output_norms: Optional[bool]=False, # added by Goro Kobayashi
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
@@ -499,6 +579,7 @@ class BertLayer(nn.Module):
             head_mask,
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
+            output_norms=output_norms, # changed by Goro Kobayashi
         )
         attention_output = self_attention_outputs[0]
 
@@ -571,10 +652,12 @@ class BertEncoder(nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
+        output_norms=False, # added by Goro Kobayashi
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+        all_norms = () if output_norms else None # added by Goro Kobayashi, edited by namrata
 
         next_decoder_cache = () if use_cache else None
         for i, layer_module in enumerate(self.layer):
@@ -615,6 +698,7 @@ class BertEncoder(nn.Module):
                     encoder_attention_mask,
                     past_key_value,
                     output_attentions,
+                    output_norms,  # added by Goro Kobayashi
                 )
 
             hidden_states = layer_outputs[0]
@@ -624,6 +708,10 @@ class BertEncoder(nn.Module):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+                    
+            # added by Goro Kobayashi
+            if output_norms:
+                all_norms = all_norms + (layer_outputs[2:],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -637,6 +725,7 @@ class BertEncoder(nn.Module):
                     all_hidden_states,
                     all_self_attentions,
                     all_cross_attentions,
+                    all_norms, # added by Namrata
                 ]
                 if v is not None
             )
@@ -646,6 +735,7 @@ class BertEncoder(nn.Module):
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
+            norm_attentions=all_norms, #added by Namrata
         )
 
 
@@ -931,6 +1021,7 @@ class BertModel(BertPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None, # added by namrata
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPoolingAndCrossAttentions]:
         r"""
         encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
@@ -1029,12 +1120,13 @@ class BertModel(BertPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            output_norms=output_norms,  # added by Goro Kobayashi
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
+            return (sequence_output, pooled_output) + encoder_outputs[1:] # add hidden_states, attentions, and norms if they are here   # changed by Goro Kobayashi
 
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
@@ -1043,6 +1135,7 @@ class BertModel(BertPreTrainedModel):
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
             cross_attentions=encoder_outputs.cross_attentions,
+            norm_attentions=encoder_outputs.norm_attentions, #added by Namrata
         )
 
 
@@ -1120,7 +1213,7 @@ class BertForPreTraining(BertPreTrainedModel):
         ```
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+  
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -1553,6 +1646,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
         labels: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_norms=None, #added by Goro Kobayashi
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
@@ -1572,6 +1666,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_norms=output_norms, #added by Goro Kobayashi
             return_dict=return_dict,
         )
 

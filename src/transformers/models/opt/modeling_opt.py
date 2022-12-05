@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Part of the code is edited by Namrata
 """ PyTorch OPT model."""
 import random
 from typing import List, Optional, Tuple, Union
@@ -118,6 +119,62 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
         return super().forward(positions + self.offset)
 
 
+class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
+    def __init__(self, config):
+        super().__init__()
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+    def forward(self, hidden_states, attention_probs, value_layer, dense):
+        # hidden_states: (batch, seq_length, all_head_size)
+        # attention_probs: (batch, num_heads, seq_length, seq_length)
+        # value_layer: (batch, num_heads, seq_length, head_size)
+        # dense: nn.Linear(all_head_size, all_head_size)
+
+        with torch.no_grad():
+
+            # value_layer is converted to (batch, seq_length, num_heads, 1, head_size)
+            value_layer = value_layer.permute(0, 2, 1, 3).contiguous()
+            # value_layer = value_layer.permute(1, 0, 2).unsqueeze(0).contiguous()  # assumed batch size of 1 - Kevin Zhao
+            value_shape = value_layer.size()
+            value_layer = value_layer.view(value_shape[:-1] + (1, value_shape[-1],))
+
+            # dense weight is converted to (num_heads, head_size, all_head_size)
+            dense = dense.weight
+            dense = dense.view(self.all_head_size, self.num_attention_heads, self.attention_head_size)
+            dense = dense.permute(1, 2, 0).contiguous()
+            
+            # Make transformed vectors f(x) from Value vectors (value_layer) and weight matrix (dense).
+            transformed_layer = value_layer.matmul(dense)
+            transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
+            transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
+            transformed_layer = transformed_layer.permute(0, 2, 1, 3).contiguous() 
+            transformed_shape = transformed_layer.size() #(batch, num_heads, seq_length, all_head_size)
+            transformed_norm = torch.norm(transformed_layer, dim=-1)
+        
+            # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
+            weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
+            weighted_norm = torch.norm(weighted_layer, dim=-1)
+            
+            # Sum each αf(x) over all heads: (batch, seq_length, seq_length, all_head_size)
+            summed_weighted_layer = weighted_layer.sum(dim=1)
+
+            # Calculate L2 norm of summed weighted vectors: (batch, seq_length, seq_length)
+            summed_weighted_norm = torch.norm(summed_weighted_layer, dim=-1)
+
+            del transformed_shape
+           
+            # outputs: ||f(x)||, ||αf(x)||, ||Σαf(x)||
+            outputs = (transformed_norm,
+                    weighted_norm,
+                    summed_weighted_norm,
+                    )
+            del transformed_layer, weighted_layer, summed_weighted_layer
+        torch.cuda.empty_cache()
+        return outputs
+
+
 class OPTAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -125,9 +182,10 @@ class OPTAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
+        config, # added by Namrata Shivagunde
         dropout: float = 0.0,
         is_decoder: bool = False,
-        bias: bool = True,
+        bias: bool = True,       
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -148,6 +206,8 @@ class OPTAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
+        self.norm = OPTNormOutput(config)  # added by Namrata Shivagunde
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -159,6 +219,7 @@ class OPTAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
+        output_norms: bool = False, # added by Namrata Shivagunde
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
 
@@ -267,7 +328,15 @@ class OPTAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped, past_key_value
+        # added by Namrata Shivagunde
+        value_states = value_states.unsqueeze(0) # batch size is assumed to be 1
+        attn_weights = attn_weights.unsqueeze(0) #  batch size is assumed to be 1
+        
+        if output_norms:
+            norms_outputs = self.norm(hidden_states, attn_weights, value_states, self.out_proj)
+            return attn_output, attn_weights_reshaped, past_key_value, norms_outputs # edited  by Namrata Shivagunde
+        
+        return attn_output, attn_weights_reshaped, past_key_value # edited  by Namrata Shivagunde
 
 
 class OPTDecoderLayer(nn.Module):
@@ -277,6 +346,7 @@ class OPTDecoderLayer(nn.Module):
         self.self_attn = OPTAttention(
             embed_dim=self.embed_dim,
             num_heads=config.num_attention_heads,
+            config=config,   # added by Namrata Shivagunde
             dropout=config.attention_dropout,
             is_decoder=True,
             bias=config.enable_bias,
@@ -300,6 +370,7 @@ class OPTDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_norms: Optional[bool] = False, # added by Namrata Shivagunde
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -323,14 +394,25 @@ class OPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
 
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            past_key_value=past_key_value,
-            attention_mask=attention_mask,
-            layer_head_mask=layer_head_mask,
-            output_attentions=output_attentions,
-        )
+        # Self Attention 
+        if output_norms:
+            hidden_states, self_attn_weights, present_key_value, norms_outputs = self.self_attn( # edited by Namrata Shivagunde
+                hidden_states=hidden_states,
+                past_key_value=past_key_value,
+                attention_mask=attention_mask,
+                layer_head_mask=layer_head_mask,
+                output_attentions=output_attentions,
+                output_norms=output_norms, # added by Namrata Shivagunde
+            )
+        else:
+            hidden_states, self_attn_weights, present_key_value = self.self_attn( # edited by Namrata Shivagunde
+                hidden_states=hidden_states,
+                past_key_value=past_key_value,
+                attention_mask=attention_mask,
+                layer_head_mask=layer_head_mask,
+                output_attentions=output_attentions,
+                output_norms=output_norms, # added by Namrata Shivagunde
+            )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 
@@ -366,7 +448,10 @@ class OPTDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
-
+       
+        if output_norms:
+            outputs += (norms_outputs,)
+      
         return outputs
 
 
@@ -560,8 +645,9 @@ class OPTDecoder(OPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None, # added by Namrata Shivagunde
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        r"""
+        """
         Args:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
                 Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
@@ -616,6 +702,8 @@ class OPTDecoder(OPTPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        output_norms = output_norms if output_norms is not None else self.config.output_norms # added by Namrata Shivagunde
+
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
@@ -650,6 +738,7 @@ class OPTDecoder(OPTPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
+        all_norms = () if output_norms else None # added by Namrata Shivagunde
 
         # check if head_mask has a correct number of layers specified if desired
         for attn_mask, mask_name in zip([head_mask], ["head_mask"]):
@@ -702,6 +791,7 @@ class OPTDecoder(OPTPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    output_norms=output_norms, # added by Namrata Shivagunde
                 )
 
             hidden_states = layer_outputs[0]
@@ -711,6 +801,11 @@ class OPTDecoder(OPTPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+            # added by Namrata Shivagunde
+            if output_norms:
+                all_norms = all_norms + (layer_outputs[-1],)
+
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
@@ -724,12 +819,13 @@ class OPTDecoder(OPTPreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_norms] if v is not None) # edited by Namrata Shivagunde
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            norm_attentions=all_norms, # added by Namrata Shivagunde
         )
 
 
@@ -772,6 +868,8 @@ class OPTModel(OPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None, # added by Namrata Shivagunde
+
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -792,6 +890,7 @@ class OPTModel(OPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            output_norms=output_norms, # added by Namrata Shivagunde
         )
 
         if not return_dict:
@@ -802,7 +901,8 @@ class OPTModel(OPTPreTrainedModel):
             past_key_values=decoder_outputs.past_key_values,
             hidden_states=decoder_outputs.hidden_states,
             attentions=decoder_outputs.attentions,
-        )
+            norm_attentions=decoder_outputs.norm_attentions, # added by Namrata Shivagunde
+        ) 
 
 
 class OPTForCausalLM(OPTPreTrainedModel):
@@ -849,8 +949,9 @@ class OPTForCausalLM(OPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None, # added by Namrata Shivagunde
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        r"""
+        """
         Args:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
                 Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
@@ -923,7 +1024,6 @@ class OPTForCausalLM(OPTPreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you consciours? Can you talk to me?\nI'm not consciours, but I can talk to you."
         ```"""
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -941,6 +1041,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            output_norms=output_norms,  # added by Namrata Shivagunde
         )
 
         logits = self.lm_head(outputs[0]).contiguous()
@@ -964,6 +1065,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            norm_attentions=outputs.norm_attentions # added by Namrata Shivagunde
         )
 
     def prepare_inputs_for_generation(self, input_ids, past=None, attention_mask=None, use_cache=None, **kwargs):
@@ -1037,6 +1139,7 @@ class OPTForSequenceClassification(OPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None, # added by Namrata Shivagunde
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1056,6 +1159,7 @@ class OPTForSequenceClassification(OPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            output_norms=output_norms, # added by Namrata Shivagunde
         )
         hidden_states = transformer_outputs[0]
         logits = self.score(hidden_states)
@@ -1111,6 +1215,7 @@ class OPTForSequenceClassification(OPTPreTrainedModel):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            norm_attentions=transformer_outputs.norm_attentions,
         )
 
     def get_input_embeddings(self):
@@ -1153,6 +1258,7 @@ class OPTForQuestionAnswering(OPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_norms: Optional[bool] = None,
     ) -> Union[Tuple, QuestionAnsweringModelOutput]:
         r"""
         start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1205,6 +1311,7 @@ class OPTForQuestionAnswering(OPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            output_norms=output_norms,
         )
         hidden_states = transformer_outputs[0]
 
@@ -1240,6 +1347,7 @@ class OPTForQuestionAnswering(OPTPreTrainedModel):
             end_logits=end_logits,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            norm_attentions=transformer_outputs.norm_attentions,
         )
 
     def get_input_embeddings(self):

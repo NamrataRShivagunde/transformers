@@ -156,6 +156,7 @@ class BaseModelOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
+    norm_attentions: Optional[Tuple[torch.FloatTensor]] = None # added by Namrata Shivagunde
 
 
 @dataclass
@@ -238,6 +239,7 @@ class BaseModelOutputWithPoolingAndCrossAttentions(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    norm_attentions: Optional[Tuple[torch.FloatTensor]] = None # added by namrata
 
 
 @dataclass
@@ -284,6 +286,7 @@ class BaseModelOutputWithPastAndCrossAttentions(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    norm_attentions: Optional[Tuple[torch.FloatTensor]] = None # added by namrata
 
 
 @dataclass
@@ -531,6 +534,7 @@ class CausalLMOutput(ModelOutput):
     logits: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
+    norm_attentions: Optional[Tuple[torch.FloatTensor]] = None # added by Namrata Shivagunde
 
 
 @dataclass
@@ -567,6 +571,7 @@ class CausalLMOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
+    norm_attentions: Optional[Tuple[torch.FloatTensor]] = None # added by Namrata Shivagunde
 
 
 @dataclass
