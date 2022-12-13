@@ -134,11 +134,12 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
 
         with torch.no_grad():
 
-            # value_layer is converted to (batch, seq_length, num_heads, 1, head_size)
-            value_layer = value_layer.permute(0, 2, 1, 3).contiguous()
-            # value_layer = value_layer.permute(1, 0, 2).unsqueeze(0).contiguous()  # assumed batch size of 1 - Kevin Zhao
-            value_shape = value_layer.size()
-            value_layer = value_layer.view(value_shape[:-1] + (1, value_shape[-1],))
+            # # value_layer is converted to (batch, seq_length, num_heads, 1, head_size)
+            # value_layer = value_layer.permute(0, 2, 1, 3).contiguous()
+            # # value_layer = value_layer.permute(1, 0, 2).unsqueeze(0).contiguous()  # assumed batch size of 1 - Kevin Zhao
+            # value_shape = value_layer.size()
+            # value_layer = value_layer.view(value_shape[:-1] + (1, value_shape[-1],))
+            value_layer = value_layer.squeeze(0) # assuming batch size is 1 ; (num_heads, seq_length, head_size))
 
             # dense weight is converted to (num_heads, head_size, all_head_size)
             dense = dense.weight
@@ -146,12 +147,15 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             dense = dense.permute(1, 2, 0).contiguous()
             
             # Make transformed vectors f(x) from Value vectors (value_layer) and weight matrix (dense).
-            transformed_layer = value_layer.matmul(dense)
-            transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
-            transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
-            transformed_layer = transformed_layer.permute(0, 2, 1, 3).contiguous() 
-            transformed_shape = transformed_layer.size() #(batch, num_heads, seq_length, all_head_size)
-            transformed_norm = torch.norm(transformed_layer, dim=-1)
+            # transformed_layer = value_layer.matmul(dense)
+            transformed_layer = torch.bmm(value_layer,dense).unsqueeze(0) # [1, num_heads, s, all_head_size]
+            transformed_norm = torch.norm(transformed_layer, dim=-1) # [1, num_heads, s]
+
+            # transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
+            # transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
+            # transformed_layer = transformed_layer.permute(0, 2, 1, 3).contiguous() 
+            # transformed_shape = transformed_layer.size() #(batch, num_heads, seq_length, all_head_size)
+            # transformed_norm = torch.norm(transformed_layer, dim=-1)
         
             # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
             weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
