@@ -179,7 +179,7 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # Calculate L2 norm of summed weighted vectors: (batch, seq_length, seq_length)
             summed_weighted_norm = torch.norm(summed_weighted_layer, dim=-1)
 
-            del transformed_shape
+            # del transformed_shape
            
             # outputs: ||f(x)||, ||αf(x)||, ||Σαf(x)||
             outputs = (transformed_norm,
