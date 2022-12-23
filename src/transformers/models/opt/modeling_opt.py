@@ -151,9 +151,10 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # transformed_layer = value_layer.matmul(dense)
             print(value_layer.shape)
             print(dense.shape)
-            transformed_layer = torch.bmm(value_layer,dense) # [num_heads, s, all_head_size]
+            transformed_layer = torch.bmm(value_layer, dense) # [num_heads, s, all_head_size]
             transformed_norm = torch.norm(transformed_layer, dim=-1) # [num_heads, s]
             transformed_norm = transformed_norm.unsqueeze(0) # [1, num_heads, s]
+            print("hi again",transformed_norm.shape)
 
             # transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
             # transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
@@ -164,6 +165,7 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
             weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
             weighted_norm = torch.norm(weighted_layer, dim=-1)
+            print("hi hiagain",weighted_norm.shape)
             
             # Sum each αf(x) over all heads: (batch, seq_length, seq_length, all_head_size)
             summed_weighted_layer = weighted_layer.sum(dim=1)
@@ -275,8 +277,6 @@ class OPTAttention(nn.Module):
         value_states = value_states.view(*proj_shape)
 
         src_len = key_states.size(1)
-        print(query_states.shape)
-        print(key_states.transpose(1, 2).shape)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
