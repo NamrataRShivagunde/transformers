@@ -151,6 +151,8 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # transformed_layer = value_layer.matmul(dense)
             print(value_layer.shape)
             print(dense.shape)
+            print(value_layer.dtype)
+            print(dense.dtypes)
             transformed_layer = torch.bmm(value_layer, dense) # [num_heads, s, all_head_size]
             transformed_norm = torch.norm(transformed_layer, dim=-1) # [num_heads, s]
             transformed_norm = transformed_norm.unsqueeze(0) # [1, num_heads, s]
