@@ -164,6 +164,10 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # transformed_norm = torch.norm(transformed_layer, dim=-1)
         
             # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
+            print(attention_probs.shape)
+            print(attention_probs.dtype)
+            print(transformed_layer.shape)
+            print(transformed_layer.dtype)
             weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
             weighted_norm = torch.norm(weighted_layer, dim=-1)
             print("hi hiagain",weighted_norm.shape)
