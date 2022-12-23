@@ -149,7 +149,7 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             
             # Make transformed vectors f(x) from Value vectors (value_layer) and weight matrix (dense).
             # transformed_layer = value_layer.matmul(dense)
-            transformed_layer = torch.bmm(value_layer,dense).unsqueeze(0) # [num_heads, s, all_head_size]
+            transformed_layer = torch.bmm(value_layer,dense) # [num_heads, s, all_head_size]
             transformed_norm = torch.norm(transformed_layer, dim=-1) # [num_heads, s]
             transformed_norm = transformed_norm.unsqueeze(0) # [1, num_heads, s]
 
