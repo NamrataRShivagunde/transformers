@@ -336,6 +336,8 @@ class OPTAttention(nn.Module):
         # added by Namrata Shivagunde
         value_states = value_states.unsqueeze(0) # batch size is assumed to be 1
         attn_weights = attn_weights.unsqueeze(0) #  batch size is assumed to be 1
+
+        print("hi")
         
         if output_norms:
             norms_outputs = self.norm(hidden_states, attn_weights, value_states, self.out_proj)
