@@ -140,7 +140,7 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # # value_layer = value_layer.permute(1, 0, 2).unsqueeze(0).contiguous()  # assumed batch size of 1 - Kevin Zhao
             # value_shape = value_layer.size()
             # value_layer = value_layer.view(value_shape[:-1] + (1, value_shape[-1],))
-            value_layer = value_layer.squeeze(0) # assuming batch size is 1 ; (num_heads, seq_length, head_size))
+            value_layer = value_layer.squeeze(0) # assuming batch size is 1 ; (num_heads, seq_length, head_size)) # added by Namrata Shivagunde
 
             # dense weight is converted to (num_heads, head_size, all_head_size)
             dense = dense.weight
@@ -149,14 +149,14 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             
             # Make transformed vectors f(x) from Value vectors (value_layer) and weight matrix (dense).
             # transformed_layer = value_layer.matmul(dense)
-            dense = dense.to(torch.float16) # dense dtype is int8
+            dense = dense.to(torch.float16) # dense dtype is int8 # added by Namrata Shivagunde
     
-            transformed_layer = torch.bmm(value_layer, dense) # [num_heads, s, all_head_size]
-            transformed_norm = torch.norm(transformed_layer, dim=-1) # [num_heads, s]
-            transformed_norm = transformed_norm.unsqueeze(0) # [1, num_heads, s]
+            transformed_layer = torch.bmm(value_layer, dense) # [num_heads, s, all_head_size] # added by Namrata Shivagunde
+            transformed_norm = torch.norm(transformed_layer, dim=-1) # [num_heads, s] # added by Namrata Shivagunde
+            transformed_norm = transformed_norm.unsqueeze(0) # [1, num_heads, s] # added by Namrata Shivagunde
 
-            transformed_layer = transformed_layer.unsqueeze(0) # [1, num_heads, s, all_head_size]
-            attention_probs = attention_probs.unsqueeze(0) # [1, num_heads, s, s]
+            transformed_layer = transformed_layer.unsqueeze(0) # [1, num_heads, s, all_head_size] # added by Namrata Shivagunde
+            attention_probs = attention_probs.unsqueeze(0) # [1, num_heads, s, s] # added by Namrata Shivagunde
 
             # transformed_shape = transformed_layer.size() #(batch, seq_length, num_heads, 1, all_head_size)
             # transformed_layer = transformed_layer.view(transformed_shape[:-2] + (transformed_shape[-1],))
@@ -165,13 +165,8 @@ class OPTNormOutput(nn.Module): # This class is added by Namrata Shivagunde
             # transformed_norm = torch.norm(transformed_layer, dim=-1)
         
             # Make weighted vectors αf(x) from transformed vectors (transformed_layer) and attention weights (attention_probs).
-            print(attention_probs.shape)
-            print(attention_probs.dtype)
-            print(transformed_layer.shape)
-            print(transformed_layer.dtype)
             weighted_layer = torch.einsum('bhks,bhsd->bhksd', attention_probs, transformed_layer) #(batch, num_heads, seq_length, seq_length, all_head_size)
             weighted_norm = torch.norm(weighted_layer, dim=-1)
-            print("hi hiagain",weighted_norm.shape)
             
             # Sum each αf(x) over all heads: (batch, seq_length, seq_length, all_head_size)
             summed_weighted_layer = weighted_layer.sum(dim=1)
@@ -283,8 +278,6 @@ class OPTAttention(nn.Module):
         value_states = value_states.view(*proj_shape)
 
         src_len = key_states.size(1)
-        print(query_states.dtype)
-        print(key_states.transpose(1, 2).dtype)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
@@ -328,8 +321,6 @@ class OPTAttention(nn.Module):
             attn_weights_reshaped = None
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
-        print(attn_probs.dtype)
-        print(value_states.dtype)
         attn_output = torch.bmm(attn_probs, value_states)
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
@@ -351,9 +342,7 @@ class OPTAttention(nn.Module):
         # value_states = value_states.unsqueeze(0) # batch size is assumed to be 1
         # attn_weights = attn_weights.unsqueeze(0) #  batch size is assumed to be 1
 
-        print("hi")
-        
-        if output_norms:
+        if output_norms: # works for batch_size 1
             norms_outputs = self.norm(hidden_states, attn_weights, value_states, self.out_proj)
             return attn_output, attn_weights_reshaped, past_key_value, norms_outputs # edited  by Namrata Shivagunde
         
